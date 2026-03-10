@@ -19,20 +19,11 @@ except ImportError:
     print("请先安装依赖: pip install playwright && playwright install chromium")
     sys.exit(1)
 
-# 导入安全存储模块
-try:
-    from security import SecureStorage
-except ImportError:
-    print("请安装加密库: pip install cryptography")
-    sys.exit(1)
-
-# 配置 - 统一使用 ~/.openclaw/data/vip/ 路径
-CONFIG_DIR = Path.home() / ".openclaw" / "data" / "vip"
+# 配置
+CONFIG_DIR = Path.home() / ".vip"
+COOKIES_FILE = CONFIG_DIR / "cookies.json"
 DB_FILE = CONFIG_DIR / "vip.db"
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-# 初始化安全存储
-secure_storage = SecureStorage(app_name="vip")
+CONFIG_DIR.mkdir(exist_ok=True)
 
 @dataclass
 class Product:
@@ -136,30 +127,26 @@ class VipClient:
         """初始化浏览器"""
         playwright = await async_playwright().start()
         self.browser = await playwright.chromium.launch(
-            headless=headless
-            # 浏览器兼容性处理：已移除自动化检测参数
+            headless=headless,
+            args=['--disable-blink-features=AutomationControlled']
         )
         context = await self.browser.new_context(
             viewport={'width': 1920, 'height': 1080},
             user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
         )
 
-        # 加载加密的cookies
-        cookies = secure_storage.load_cookies()
-        if cookies:
+        # 加载cookies
+        if COOKIES_FILE.exists():
+            cookies = json.loads(COOKIES_FILE.read_text())
             await context.add_cookies(cookies)
 
         self.page = await context.new_page()
 
-        # 标准浏览器兼容性处理：确保网页正常渲染
+        # 注入反检测脚本
         await self.page.add_init_script("""
-            // 标准浏览器兼容性处理：部分网站依赖 navigator.webdriver 属性
-            // 设置为 false 表示正常浏览器环境，确保网页功能正常
-            if (typeof navigator.webdriver === 'undefined') {
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false
-                });
-            }
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
         """)
 
     async def close(self):
@@ -178,10 +165,10 @@ class VipClient:
         print("请使用唯品会APP扫码登录...")
         await self.page.wait_for_selector(".user-info", timeout=120000)
 
-        # 保存加密的cookies
+        # 保存cookies
         cookies = await self.page.context.cookies()
-        secure_storage.save_cookies(cookies)
-        print(f"✅ 登录成功！Cookies已加密保存")
+        COOKIES_FILE.write_text(json.dumps(cookies))
+        print(f"登录成功！Cookies已保存到 {COOKIES_FILE}")
 
         await self.close()
 
@@ -440,81 +427,15 @@ def format_brand(b: Brand, index: int) -> str:
     链接: {b.url}
 """
 
-async def privacy_command(args):
-    """处理隐私相关命令"""
-    if args.privacy_action == "info":
-        info = secure_storage.get_privacy_info()
-        print("\n🔐 隐私信息摘要")
-        print("="*60)
-        print(f"应用: {info['app']}")
-        print(f"存储目录: {info['storage_dir']}")
-        print(f"用户同意: {'✅ 已同意' if info['has_consent'] else '❌ 未同意'}")
-        print(f"保存的Cookies: {'✅ 有' if info['has_cookies'] else '❌ 无'}")
-        print(f"加密密钥: {'✅ 已生成' if info['has_key'] else '❌ 未生成'}")
-        
-        if info['files']:
-            print("\n📁 存储文件:")
-            for file in info['files']:
-                print(f"  - {file['name']} ({file['size']} bytes, 权限: {file['permissions']})")
-    
-    elif args.privacy_action == "clear":
-        print("⚠️  即将清除所有敏感数据（Cookies、密钥等）")
-        confirm = input("确认清除？(输入 'yes' 确认): ")
-        if confirm.lower() == 'yes':
-            secure_storage.clear_sensitive_data()
-            print("✅ 所有敏感数据已安全清除")
-        else:
-            print("❌ 操作已取消")
-    
-    elif args.privacy_action == "export":
-        export_path = secure_storage.export_data()
-        print(f"✅ 数据已导出到: {export_path}")
-        print("💡 请确保同时备份密钥文件以恢复数据")
-    
-    elif args.privacy_action == "consent":
-        if secure_storage.check_consent():
-            print("✅ 用户同意检查通过")
-        else:
-            print("❌ 需要用户同意才能继续")
-            sys.exit(1)
-
 async def main():
     parser = argparse.ArgumentParser(description="唯品会购物助手")
-    subparsers = parser.add_subparsers(dest="command", help="可用命令")
-    
-    # 搜索命令
-    search_parser = subparsers.add_parser("search", help="搜索商品")
-    search_parser.add_argument("keyword", help="搜索关键词")
-    search_parser.add_argument("--page", type=int, default=1, help="页码")
-    
-    # 特卖命令
-    sale_parser = subparsers.add_parser("sale", help="获取特卖活动")
-    
-    # 品牌命令
-    brand_parser = subparsers.add_parser("brand", help="获取品牌专区")
-    brand_parser.add_argument("category", nargs="?", default="all", help="品牌分类")
-    
-    # 登录命令
-    login_parser = subparsers.add_parser("login", help="扫码登录")
-    
-    # 隐私命令
-    privacy_parser = subparsers.add_parser("privacy", help="隐私控制")
-    privacy_parser.add_argument("privacy_action", 
-                               choices=["info", "clear", "export", "consent"],
-                               help="隐私操作")
-    
+    parser.add_argument("command", choices=["search", "sale", "brand", "login"])
+    parser.add_argument("arg", nargs="?", help="搜索关键词/分类")
+    parser.add_argument("--page", type=int, default=1, help="页码")
+    parser.add_argument("--category", type=str, default="all", help="品牌分类")
+
     args = parser.parse_args()
-    
-    # 检查用户同意（除隐私命令外）
-    if args.command != "privacy" and args.command != "consent":
-        if not secure_storage.check_consent():
-            print("❌ 需要用户同意才能使用本技能")
-            sys.exit(1)
-    
-    if args.command == "privacy":
-        await privacy_command(args)
-        return
-    
+
     client = VipClient()
 
     try:
@@ -522,7 +443,10 @@ async def main():
             await client.login()
 
         elif args.command == "search":
-            products = await client.search(args.keyword, args.page)
+            if not args.arg:
+                print("请提供搜索关键词")
+                return
+            products = await client.search(args.arg, args.page)
             print(f"\n找到 {len(products)} 个商品:\n")
             for i, p in enumerate(products, 1):
                 print(format_product(p, i))
@@ -534,7 +458,8 @@ async def main():
                 print(format_sale(s, i))
 
         elif args.command == "brand":
-            brands = await client.get_brands(args.category)
+            category = args.arg or args.category
+            brands = await client.get_brands(category)
             print(f"\n品牌专区 ({len(brands)} 个):\n")
             for i, b in enumerate(brands, 1):
                 print(format_brand(b, i))
