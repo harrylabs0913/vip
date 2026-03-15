@@ -1,0 +1,4 @@
+data/
+*.log
+dist/
+node_modules/
